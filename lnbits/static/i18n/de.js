@@ -34,6 +34,7 @@ window.localisation.de = {
     'Alle Einstellungen auf die Standardeinstellungen zurücksetzen.',
   download_backup: 'Datenbank-Backup herunterladen',
   name_your_wallet: 'Vergib deiner %{name} Wallet einen Namen',
+  wallet_topup_ok: 'Success creating virtual funds (%{amount} sats). Payments depend on actual funds on funding source.',
   paste_invoice_label:
     'Füge eine Rechnung, Zahlungsanforderung oder LNURL ein *',
   lnbits_description:
