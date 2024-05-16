@@ -15,7 +15,7 @@ from .base import (
 class VoidWallet(Wallet):
     async def create_invoice(self, *_, **__) -> InvoiceResponse:
         return InvoiceResponse(
-            ok=False, error_message="VoidWallet cannot create invoices."
+            ok=False, error_message="VoidWallet cannot create invoices. Please check funding source config and make sure LNbits is publicly accessible. "
         )
 
     async def status(self) -> StatusResponse:
