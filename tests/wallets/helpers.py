@@ -55,14 +55,14 @@ def _tests_for_funding_source(
 
 
 def build_test_id(test: WalletTest):
-    return f"{test.funding_source}.{test.function}({test.description})"
+    return f"{test.funding_source.name}.{test.function}({test.description})"
 
 
 def load_funding_source(funding_source: FundingSourceConfig) -> BaseWallet:
     custom_settings = funding_source.settings
     original_settings = {}
 
-    settings = getattr(wallets_module, "settings")
+    settings = wallets_module.settings
 
     for s in custom_settings:
         original_settings[s] = getattr(settings, s)
@@ -83,7 +83,13 @@ async def check_assertions(wallet, _test_data: WalletTest):
     call_params = _test_data.call_params
 
     if "expect" in test_data:
-        await _assert_data(wallet, tested_func, call_params, _test_data.expect)
+        await _assert_data(
+            wallet,
+            tested_func,
+            call_params,
+            _test_data.expect,
+            _test_data.description,
+        )
         # if len(_test_data.mocks) == 0:
         #     # all calls should fail after this method is called
         #     await wallet.cleanup()
@@ -93,17 +99,28 @@ async def check_assertions(wallet, _test_data: WalletTest):
     elif "expect_error" in test_data:
         await _assert_error(wallet, tested_func, call_params, _test_data.expect_error)
     else:
-        assert False, "Expected outcome not specified"
+        raise AssertionError("Expected outcome not specified")
 
 
-async def _assert_data(wallet, tested_func, call_params, expect):
+async def _assert_data(wallet, tested_func, call_params, expect, description):
     resp = await getattr(wallet, tested_func)(**call_params)
+    fn_prefix = "__eval__:"
     for key in expect:
-        received = getattr(resp, key)
         expected = expect[key]
-        assert (
-            getattr(resp, key) == expect[key]
-        ), f"""Field "{key}". Received: "{received}". Expected: "{expected}"."""
+        if key.startswith(fn_prefix):
+            key = key[len(fn_prefix) :]
+            received = getattr(resp, key)
+            expected = expected.format(**{key: received, "description": description})
+            _assert = eval(expected)
+        else:
+            received = getattr(resp, key)
+            _assert = getattr(resp, key) == expect[key]
+
+        assert _assert, (
+            f""" Field "{key}"."""
+            f""" Received: "{received}"."""
+            f""" Expected: "{expected}"."""
+        )
 
 
 async def _assert_error(wallet, tested_func, call_params, expect_error):

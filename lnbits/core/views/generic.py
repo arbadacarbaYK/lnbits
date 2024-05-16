@@ -171,9 +171,11 @@ async def extensions_install(
                 "extensions": extensions,
             },
         )
-    except Exception as e:
-        logger.warning(e)
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
+    except Exception as exc:
+        logger.warning(exc)
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
 
 
 @generic_router.get(
@@ -372,7 +374,7 @@ async def node_public(request: Request):
 
 
 @generic_router.get("/admin", response_class=HTMLResponse)
-async def index(request: Request, user: User = Depends(check_admin)):
+async def admin_index(request: Request, user: User = Depends(check_admin)):
     if not settings.lnbits_admin_ui:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND)
 
@@ -391,13 +393,31 @@ async def index(request: Request, user: User = Depends(check_admin)):
     )
 
 
+@generic_router.get("/users", response_class=HTMLResponse)
+async def users_index(request: Request, user: User = Depends(check_admin)):
+    if not settings.lnbits_admin_ui:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND)
+
+    return template_renderer().TemplateResponse(
+        "users/index.html",
+        {
+            "request": request,
+            "user": user.dict(),
+            "settings": settings.dict(),
+            "currencies": list(currencies.keys()),
+        },
+    )
+
+
 @generic_router.get("/uuidv4/{hex_value}")
 async def hex_to_uuid4(hex_value: str):
     try:
         user_id = to_valid_user_id(hex_value).hex
         return RedirectResponse(url=f"/wallet?usr={user_id}")
-    except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
+        ) from exc
 
 
 async def toggle_extension(extension_to_enable, extension_to_disable, user_id):

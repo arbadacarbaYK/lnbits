@@ -70,14 +70,11 @@ class PaymentStatus(NamedTuple):
         return self.paid is False
 
     def __str__(self) -> str:
-        if self.paid is True:
-            return "settled"
-        elif self.paid is False:
+        if self.success:
+            return "success"
+        if self.failed:
             return "failed"
-        elif self.paid is None:
-            return "still pending"
-        else:
-            return "unknown (should never happen)"
+        return "pending"
 
 
 class PaymentSuccessStatus(PaymentStatus):
@@ -93,10 +90,12 @@ class PaymentPendingStatus(PaymentStatus):
 
 
 class Wallet(ABC):
-    async def cleanup(self):
-        pass
 
     __node_cls__: Optional[type[Node]] = None
+
+    @abstractmethod
+    async def cleanup(self):
+        pass
 
     @abstractmethod
     def status(self) -> Coroutine[None, None, StatusResponse]:

@@ -3,7 +3,7 @@ import json
 import uuid
 from http import HTTPStatus
 from math import ceil
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.parse import urlparse
 
 import httpx
@@ -13,6 +13,7 @@ from fastapi import (
     Depends,
     Header,
     HTTPException,
+    Query,
     Request,
 )
 from fastapi.responses import JSONResponse
@@ -25,12 +26,11 @@ from lnbits.core.models import (
     CreateInvoice,
     CreateLnurl,
     DecodePayment,
+    KeyType,
     Payment,
     PaymentFilters,
     PaymentHistoryPoint,
-    Query,
     Wallet,
-    WalletType,
 )
 from lnbits.db import Filters, Page
 from lnbits.decorators import (
@@ -55,8 +55,6 @@ from ..crud import (
     update_pending_payments,
 )
 from ..services import (
-    InvoiceError,
-    PaymentError,
     check_transaction_status,
     create_invoice,
     fee_reserve_total,
@@ -133,78 +131,75 @@ async def api_payments_create_invoice(data: CreateInvoice, wallet: Wallet):
         if data.description_hash:
             try:
                 description_hash = bytes.fromhex(data.description_hash)
-            except ValueError:
+            except ValueError as exc:
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail="'description_hash' must be a valid hex string",
-                )
+                ) from exc
         if data.unhashed_description:
             try:
                 unhashed_description = bytes.fromhex(data.unhashed_description)
-            except ValueError:
+            except ValueError as exc:
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail="'unhashed_description' must be a valid hex string",
-                )
+                ) from exc
         # do not save memo if description_hash or unhashed_description is set
         memo = ""
 
     async with db.connect() as conn:
-        try:
-            payment_hash, payment_request = await create_invoice(
-                wallet_id=wallet.id,
-                amount=data.amount,
-                memo=memo,
-                currency=data.unit,
-                description_hash=description_hash,
-                unhashed_description=unhashed_description,
-                expiry=data.expiry,
-                extra=data.extra,
-                webhook=data.webhook,
-                internal=data.internal,
-                conn=conn,
-            )
-            # NOTE: we get the checking_id with a seperate query because create_invoice
-            # does not return it and it would be a big hustle to change its return type
-            # (used across extensions)
-            payment_db = await get_standalone_payment(payment_hash, conn=conn)
-            assert payment_db is not None, "payment not found"
-            checking_id = payment_db.checking_id
-        except InvoiceError as e:
-            raise HTTPException(status_code=520, detail=str(e))
-        except Exception as exc:
-            raise exc
+        payment_hash, payment_request = await create_invoice(
+            wallet_id=wallet.id,
+            amount=data.amount,
+            memo=memo,
+            currency=data.unit,
+            description_hash=description_hash,
+            unhashed_description=unhashed_description,
+            expiry=data.expiry,
+            extra=data.extra,
+            webhook=data.webhook,
+            internal=data.internal,
+            conn=conn,
+        )
+        # NOTE: we get the checking_id with a seperate query because create_invoice
+        # does not return it and it would be a big hustle to change its return type
+        # (used across extensions)
+        payment_db = await get_standalone_payment(payment_hash, conn=conn)
+        assert payment_db is not None, "payment not found"
+        checking_id = payment_db.checking_id
 
     invoice = bolt11.decode(payment_request)
+
+    lnurl_response: Union[None, bool, str] = None
+    if data.lnurl_callback:
+        headers = {"User-Agent": settings.user_agent}
+        async with httpx.AsyncClient(headers=headers) as client:
+            try:
+                r = await client.get(
+                    data.lnurl_callback,
+                    params={
+                        "pr": payment_request,
+                    },
+                    timeout=10,
+                )
+                if r.is_error:
+                    lnurl_response = r.text
+                else:
+                    resp = json.loads(r.text)
+                    if resp["status"] != "OK":
+                        lnurl_response = resp["reason"]
+                    else:
+                        lnurl_response = True
+            except (httpx.ConnectError, httpx.RequestError) as ex:
+                logger.error(ex)
+                lnurl_response = False
 
     return {
         "payment_hash": invoice.payment_hash,
         "payment_request": payment_request,
+        "lnurl_response": lnurl_response,
         # maintain backwards compatibility with API clients:
         "checking_id": checking_id,
-    }
-
-
-async def api_payments_pay_invoice(
-    bolt11: str, wallet: Wallet, extra: Optional[dict] = None
-):
-    try:
-        payment_hash = await pay_invoice(
-            wallet_id=wallet.id, payment_request=bolt11, extra=extra
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    except PermissionError as e:
-        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail=str(e))
-    except PaymentError as e:
-        raise HTTPException(status_code=520, detail=str(e))
-    except Exception as exc:
-        raise exc
-
-    return {
-        "payment_hash": payment_hash,
-        # maintain backwards compatibility with API clients:
-        "checking_id": payment_hash,
     }
 
 
@@ -220,20 +215,34 @@ async def api_payments_pay_invoice(
         field to supply the BOLT11 invoice to be paid.
     """,
     status_code=HTTPStatus.CREATED,
+    responses={
+        400: {"description": "Invalid BOLT11 string or missing fields."},
+        401: {"description": "Invoice (or Admin) key required."},
+        520: {"description": "Payment or Invoice error."},
+    },
 )
 async def api_payments_create(
     wallet: WalletTypeInfo = Depends(require_invoice_key),
     invoice_data: CreateInvoice = Body(...),
 ):
-    if invoice_data.out is True and wallet.wallet_type == WalletType.admin:
+    if invoice_data.out is True and wallet.key_type == KeyType.admin:
         if not invoice_data.bolt11:
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="BOLT11 string is invalid or not given",
             )
-        return await api_payments_pay_invoice(
-            invoice_data.bolt11, wallet.wallet, invoice_data.extra
-        )  # admin key
+
+        payment_hash = await pay_invoice(
+            wallet_id=wallet.wallet.id,
+            payment_request=invoice_data.bolt11,
+            extra=invoice_data.extra,
+        )
+        return {
+            "payment_hash": payment_hash,
+            # maintain backwards compatibility with API clients:
+            "checking_id": payment_hash,
+        }
+
     elif not invoice_data.out:
         # invoice key
         return await api_payments_create_invoice(invoice_data, wallet.wallet)
@@ -282,11 +291,11 @@ async def api_payments_pay_lnurl(
             if r.is_error:
                 raise httpx.ConnectError("LNURL callback connection error")
             r.raise_for_status()
-        except (httpx.ConnectError, httpx.RequestError):
+        except (httpx.ConnectError, httpx.RequestError) as exc:
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail=f"Failed to connect to {domain}.",
-            )
+            ) from exc
 
     params = json.loads(r.text)
     if params.get("status") == "ERROR":
@@ -352,7 +361,7 @@ async def subscribe_wallet_invoices(request: Request, wallet: Wallet):
     api_invoice_listeners[uid] = payment_queue
 
     try:
-        while True:
+        while settings.lnbits_running:
             if await request.is_disconnected():
                 await request.close()
                 break
@@ -407,7 +416,7 @@ async def api_payment(payment_hash, x_api_key: Optional[str] = Header(None)):
         return {"paid": True, "preimage": payment.preimage}
 
     try:
-        await payment.check_status()
+        status = await payment.check_status()
     except Exception:
         if wallet and wallet.id == payment.wallet_id:
             return {"paid": False, "details": payment}
@@ -416,6 +425,7 @@ async def api_payment(payment_hash, x_api_key: Optional[str] = Header(None)):
     if wallet and wallet.id == payment.wallet_id:
         return {
             "paid": not payment.pending,
+            "status": f"{status!s}",
             "preimage": payment.preimage,
             "details": payment,
         }

@@ -22,11 +22,18 @@ window.LNbits = {
         data: data
       })
     },
-    createInvoice: async function (wallet, amount, memo, unit = 'sat') {
+    createInvoice: async function (
+      wallet,
+      amount,
+      memo,
+      unit = 'sat',
+      lnurlCallback = null
+    ) {
       return this.request('post', '/api/v1/payments', wallet.inkey, {
         out: false,
         amount: amount,
         memo: memo,
+        lnurl_callback: lnurlCallback,
         unit: unit
       })
     },
@@ -138,7 +145,7 @@ window.LNbits = {
       )
     },
     updateBalance: function (credit, wallet_id) {
-      return LNbits.api.request('PUT', '/admin/api/v1/topup/', null, {
+      return LNbits.api.request('PUT', '/users/api/v1/topup/', null, {
         amount: credit,
         id: wallet_id
       })
